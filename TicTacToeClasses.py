@@ -8,7 +8,6 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from torch.autograd import Variable
 
-from TicTacToeEnv import TicTacToe
 
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device('cpu')
 
@@ -41,6 +40,23 @@ class Network(nn.Module):
 
     def forward(self, x):
         x = F.relu(self.c1(x))
+        x = torch.flatten(x, 1)
+        x = F.relu(self.l1(x))
+        x = self.l2(x)
+        return x
+
+
+class Network4x4(nn.Module):
+    def __init__(self, conv_size=128):
+        nn.Module.__init__(self)
+        self.c1 = nn.Conv2d(3, 16, (3, 3))
+        self.c2 = nn.Conv2d(16, conv_size * 2, (2, 2))
+        self.l1 = nn.Linear(conv_size * 2, conv_size)
+        self.l2 = nn.Linear(conv_size, 16)
+
+    def forward(self, x):
+        x = F.relu(self.c1(x))
+        x = F.relu(self.c2(x))
         x = torch.flatten(x, 1)
         x = F.relu(self.l1(x))
         x = self.l2(x)
@@ -234,3 +250,124 @@ class TicTacToeDoubleDQN(TicTacToeDQN):
         self.episodes_learned[cur_turn] += 1
         if self.episodes_learned[cur_turn] % 500:
             self.target_models[cur_turn].load_state_dict(self.models[cur_turn].state_dict())
+
+
+class Node():
+    def __init__(self, action, state, parent, layer):
+        self.action = action
+        self.board_hash = state[0]
+        self.empty_spaces = state[1]
+        self.turn = state[2]
+        self.parent = parent
+        self.children = dict()
+        self.n = 0
+        self.w = 0
+        self.layer = layer
+        
+    @property
+    def unvisited(self):
+        return self.n == 0
+
+
+class MCTS():
+    def __init__(self, env, player=1, c=0.5):
+        self.env = env
+        self.env.reset()
+        self.root = Node(None, self.env.getState(), None, 0)
+        self.c = c
+        self.player = player
+    
+    def learn_episode(self):
+        done = False
+        self.env.reset()
+        state = self.env.getState()
+        node = self.root
+        while not done:
+            if node.unvisited: 
+                while not done:
+                    empty_spaces = self.env.getState()[1]
+                    a = random.choice(empty_spaces)
+                    state, reward, done, _ = self.env.step(a)
+                break
+            if state[2] == self.player:
+                if len(node.children) < len(node.empty_spaces):
+                    for action in node.empty_spaces:
+                        action_int = self.env.int_from_action(action)
+                        if action_int not in node.children.keys():
+                            a = action
+                            break
+                else: 
+                    best_value = 0
+                    values = []
+                    for action in node.empty_spaces:
+                        action_int = self.env.int_from_action(action)
+                        exploitation = node.children[action_int].w / node.children[action_int].n
+                        exploration = np.sqrt(np.log(node.n) / node.children[action_int].n)
+                        values.append((node.children[action_int].n, exploitation, exploration))
+                        value = exploitation + self.c * exploration
+                        if value > best_value:
+                            best_value = value
+                            a = action
+            else: 
+                empty_spaces = self.env.getState()[1]
+                a = random.choice(empty_spaces) 
+            state, reward, done, _ = self.env.step(a)
+            a_int = self.env.int_from_action(a)
+            if a_int in node.children:
+                node = node.children[a_int]
+            else:
+                next_node = Node(action=a, state=state, parent=node, layer=node.layer + 1)
+                node.children[a_int] = next_node
+                node = next_node
+            
+        if reward == -10:
+            raise Exception('Неверная очередь')
+        while node.parent:
+            node.n += 1
+            if node.turn == -reward:
+                node.w += 1
+            node = node.parent
+        node.n += 1
+        if node.turn == -reward:
+            node.w += 1
+        
+    def rollout(self):
+        done = False
+        _, empty_spaces, _ = self.env.getState()
+        while not done:
+            a = random.choice(empty_spaces)
+            state, reward, done, _ = self.env.step(a)
+            _, empty_spaces, _ = state
+        return reward
+        
+    def test_game(self):
+        positions = []
+        self.env.reset()
+        node = self.root
+        board_hash, empty_spaces, turn = self.env.getState()
+        done = False
+        
+        while not done:
+            positions.append(board_hash)
+            if turn == self.player: 
+                if len(node.children) < len(empty_spaces) or len(node.children) == 0: # Rollout, т.к. совсем мало знаем
+                    return self.rollout(), positions
+                best_value = -1.0
+                for action_int in node.children.keys():
+                    action = self.env.action_from_int(action_int)
+                    value = node.children[action_int].w / node.children[action_int].n
+                    if value > best_value:
+                        best_value = value
+                        a = action
+            else:
+                a = random.choice(empty_spaces)
+            state, reward, done, _ = self.env.step(a)
+            if not done:
+                board_hash, empty_spaces, turn = state
+                a_int = self.env.int_from_action(a)
+                if a_int in node.children:
+                    node = node.children[a_int]
+                else:
+                    return self.rollout(), positions
+
+        return reward, positions
